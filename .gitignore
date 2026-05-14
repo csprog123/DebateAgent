@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+node_modules/
+output/debate_data.json
+output/debate_report.docx
+output/debate_report.md
+.DS_Store

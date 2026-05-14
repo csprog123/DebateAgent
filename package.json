@@ -1,0 +1,13 @@
+{
+  "name": "debate-agent-report",
+  "version": "1.0.0",
+  "description": "DOCX report generator for the multi-agent adversarial debate tool.",
+  "private": true,
+  "main": "generate_report.js",
+  "scripts": {
+    "generate": "node generate_report.js output/debate_data.json"
+  },
+  "dependencies": {
+    "docx": "^8.5.0"
+  }
+}
