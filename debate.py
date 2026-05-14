@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from difflib import SequenceMatcher
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 try:
@@ -580,7 +581,15 @@ def detect_groupthink(round1: list[dict[str, Any]]) -> bool:
 
 async def run_debate(
     client: AsyncAnthropic, agents: dict[str, Agent], proposal_type: str,
+    continue_on_critical: bool | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
+    """Run the 3-round debate.
+
+    continue_on_critical:
+      None  → ask interactively (only if stdin is a TTY); otherwise stop.
+      True  → continue past CRITICAL risks without prompting.
+      False → stop at the first CRITICAL risk and return what we have.
+    """
 
     transcript: dict[str, list[dict[str, Any]]] = {"round_1": [], "round_2": [], "round_3": []}
 
@@ -608,8 +617,14 @@ async def run_debate(
         for it in critical_items:
             print(f"  [{it.get('id')}] {it.get('description')}")
         print("=" * 72 + "\033[0m")
-        ans = input("CRITICAL risk identified. Continue debate? (Y/N): ").strip().lower()
-        if ans != "y":
+        proceed = False
+        if continue_on_critical is True:
+            proceed = True
+        elif continue_on_critical is False:
+            proceed = False
+        elif sys.stdin.isatty():
+            proceed = input("CRITICAL risk identified. Continue debate? (Y/N): ").strip().lower() == "y"
+        if not proceed:
             print("[INFO] Skipping to final synthesis with CRITICAL flag.")
             return transcript
 
@@ -814,8 +829,7 @@ def synthesise(
 # Markdown report
 # ---------------------------------------------------------------------------
 
-def write_markdown(data: dict[str, Any]) -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def render_markdown(data: dict[str, Any]) -> str:
     md: list[str] = []
     m = data["metadata"]
     s = data["resilience_score"]
@@ -883,7 +897,12 @@ def write_markdown(data: dict[str, Any]) -> None:
         a = r.get("agent", "?")
         md.append(f"| {a} | {persona_lookup.get(a, '')} | {r.get('verdict','')} | {r.get('critical_condition','')} |\n")
 
-    MARKDOWN_PATH.write_text("".join(md), encoding="utf-8")
+    return "".join(md)
+
+
+def write_markdown(data: dict[str, Any]) -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    MARKDOWN_PATH.write_text(render_markdown(data), encoding="utf-8")
     print(f"[INFO] Markdown report written: {MARKDOWN_PATH}")
 
 
@@ -907,6 +926,105 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+async def run_pipeline(
+    proposal_text: str,
+    title: str,
+    source_label: str,
+    *,
+    proposal_type: str | None = None,
+    persona_args: Any = None,
+    continue_on_critical: bool | None = None,
+    write_files: bool = False,
+) -> dict[str, Any]:
+    """Run the full debate pipeline and return the structured `debate_data` dict.
+
+    Used by both the CLI (`amain`) and the FastAPI handler (`api/index.py`).
+
+    Parameters
+    ----------
+    proposal_text : raw proposal text.
+    title : display title for the report.
+    source_label : "notion" | "file" | "text" | "api".
+    proposal_type : optional override; if None, the classifier picks one.
+    persona_args : duck-typed namespace exposing the persona_1..4 and
+        persona_config fields used by `build_persona_config`. If None,
+        all defaults are used.
+    continue_on_critical : see `run_debate`. The CLI passes None (interactive
+        TTY prompt); the API passes True/False to control non-interactive flow.
+    write_files : when True, mirrors the legacy CLI side-effects
+        (debate_data.json, debate_report.md).
+
+    Returns
+    -------
+    dict with keys: metadata, personas, resilience_score, round_1/2/3,
+    synthesis, proposal_summary, markdown_report.
+    """
+    client = AsyncAnthropic()
+
+    if proposal_type is None:
+        proposal_type = await classify_proposal(client, proposal_text)
+        print(f"[INFO] Proposal classified as: {proposal_type}")
+    else:
+        print(f"[INFO] Proposal type set explicitly: {proposal_type}")
+
+    if persona_args is None:
+        persona_args = SimpleNamespace(
+            persona_1=None, persona_2=None, persona_3=None, persona_4=None,
+            persona_config=None,
+        )
+    personas = build_persona_config(persona_args, proposal_type)
+    for aid, pc in personas.items():
+        print(f"[INFO] {AGENT_DISPLAY_NAMES[aid]} persona: "
+              f"{'custom' if pc.is_custom else 'default'} → {pc.name}")
+
+    agents: dict[str, Agent] = {}
+    for aid, pc in personas.items():
+        agents[aid] = Agent(
+            agent_id=aid, persona=pc,
+            system_prompt=build_system_prompt(aid, pc, proposal_type, proposal_text),
+        )
+
+    transcript = await run_debate(client, agents, proposal_type,
+                                  continue_on_critical=continue_on_critical)
+    score, synthesis = synthesise(transcript)
+
+    proposal_summary = (
+        proposal_text[:600] + ("…" if len(proposal_text) > 600 else "")
+    ).replace("\n", " ").strip()
+
+    debate_data: dict[str, Any] = {
+        "metadata": {
+            "proposal_title": title,
+            "input_source": source_label,
+            "proposal_type": proposal_type,
+            "adaptive_persona": personas["agent_4"].name,
+            "debate_date": date.today().isoformat(),
+            "rounds_completed": sum(1 for k in ("round_1", "round_2", "round_3") if transcript.get(k)),
+        },
+        "personas": {
+            aid: {"name": personas[aid].name,
+                  "type": "custom" if personas[aid].is_custom else "default"}
+            for aid in personas
+        },
+        "resilience_score": score,
+        "round_1": transcript.get("round_1", []),
+        "round_2": transcript.get("round_2", []),
+        "round_3": transcript.get("round_3", []),
+        "synthesis": synthesis,
+        "proposal_summary": proposal_summary,
+    }
+    debate_data["markdown_report"] = render_markdown(debate_data)
+
+    if write_files:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        DEBATE_DATA_PATH.write_text(json.dumps(debate_data, indent=2), encoding="utf-8")
+        print(f"[INFO] Debate data written: {DEBATE_DATA_PATH}")
+        MARKDOWN_PATH.write_text(debate_data["markdown_report"], encoding="utf-8")
+        print(f"[INFO] Markdown report written: {MARKDOWN_PATH}")
+
+    return debate_data
+
+
 async def amain() -> int:
     args = parse_args()
     if not os.environ.get("ANTHROPIC_API_KEY"):
@@ -918,65 +1036,17 @@ async def amain() -> int:
         print("[ERROR] Proposal text is empty.")
         return 2
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    client = AsyncAnthropic()
+    debate_data = await run_pipeline(
+        proposal_text=proposal,
+        title=title,
+        source_label=source_label,
+        proposal_type=args.proposal_type,
+        persona_args=args,
+        continue_on_critical=None,
+        write_files=True,
+    )
 
-    # Classifier
-    if args.proposal_type:
-        proposal_type = args.proposal_type
-        print(f"[INFO] Proposal type overridden via CLI: {proposal_type}")
-    else:
-        proposal_type = await classify_proposal(client, proposal)
-        print(f"[INFO] Proposal classified as: {proposal_type}")
-
-    # Personas
-    personas = build_persona_config(args, proposal_type)
-    for aid, pc in personas.items():
-        print(f"[INFO] {AGENT_DISPLAY_NAMES[aid]} persona: "
-              f"{'custom' if pc.is_custom else 'default'} → {pc.name}")
-
-    # Agents
-    agents: dict[str, Agent] = {}
-    for aid, pc in personas.items():
-        agents[aid] = Agent(
-            agent_id=aid, persona=pc,
-            system_prompt=build_system_prompt(aid, pc, proposal_type, proposal),
-        )
-
-    # Run debate
-    transcript = await run_debate(client, agents, proposal_type)
-    score, synthesis = synthesise(transcript)
-
-    adaptive_name, _ = ADAPTIVE_PERSONA_BY_TYPE[proposal_type]
-    proposal_summary = (proposal[:600] + ("…" if len(proposal) > 600 else "")).replace("\n", " ").strip()
-
-    debate_data = {
-        "metadata": {
-            "proposal_title": title,
-            "input_source": source_label,
-            "proposal_type": proposal_type,
-            "adaptive_persona": personas["agent_4"].name,
-            "debate_date": date.today().isoformat(),
-            "rounds_completed": sum(1 for k in ("round_1", "round_2", "round_3") if transcript.get(k)),
-        },
-        "personas": {
-            aid: {"name": personas[aid].name, "type": "custom" if personas[aid].is_custom else "default"}
-            for aid in personas
-        },
-        "resilience_score": score,
-        "round_1": transcript.get("round_1", []),
-        "round_2": transcript.get("round_2", []),
-        "round_3": transcript.get("round_3", []),
-        "synthesis": synthesis,
-        "proposal_summary": proposal_summary,
-    }
-
-    DEBATE_DATA_PATH.write_text(json.dumps(debate_data, indent=2), encoding="utf-8")
-    print(f"[INFO] Debate data written: {DEBATE_DATA_PATH}")
-
-    write_markdown(debate_data)
-
-    # DOCX generation via Node
+    # DOCX generation via Node (CLI-only — Node is not available in the Vercel runtime)
     if shutil.which("node"):
         try:
             subprocess.run(
@@ -989,7 +1059,8 @@ async def amain() -> int:
     else:
         print("[WARN] Node.js not found. Falling back to .md only.")
 
-    print(f"\n=== RESILIENCE SCORE: {score['total']}/100 — {score['band']} ===\n")
+    s = debate_data["resilience_score"]
+    print(f"\n=== RESILIENCE SCORE: {s['total']}/100 — {s['band']} ===\n")
     return 0
 
 

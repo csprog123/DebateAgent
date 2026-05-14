@@ -152,6 +152,32 @@ Bands:
 | `output/debate_report.docx`         | Only if `node` is on `PATH` and `docx` is installed |
 | `output/debate_data.json`           | Structured handoff (Python → Node)            |
 
+## Deploying to Vercel
+
+The repo ships with a FastAPI wrapper at `api/index.py` so the tool can run
+as a Vercel serverless function.
+
+1. Connect the GitHub repo to a Vercel project (or run `vercel link` locally).
+2. In **Project Settings → Environment Variables**, add:
+   - `ANTHROPIC_API_KEY` (required)
+   - `NOTION_API_KEY` (optional)
+3. Deploy. The function entrypoint is `api/index.py`, configured via
+   `vercel.json` (300s `maxDuration`).
+
+Endpoints:
+- `GET /` — minimal HTML form (paste proposal, optional persona overrides)
+- `POST /api/debate` — JSON body matching `DebateRequest`; returns the full
+  `debate_data` payload including `markdown_report`
+- `GET /api/health` — liveness + key-presence probe
+
+Timeout note: a full 3-round debate typically runs 30–90s. Vercel Hobby caps
+function execution at 60s regardless of `maxDuration`. For reliable runs use
+**Pro** or higher.
+
+DOCX output is **not** generated in the serverless path — Node is unavailable
+inside a Python function. The hosted version returns Markdown + structured
+JSON; run the CLI locally if you need a `.docx`.
+
 ## Limitations
 - The Notion adapter uses the canonical Notion REST API with an integration
   token. The MCP transport (`mcp.notion.com/mcp`) is mentioned in the spec
