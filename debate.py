@@ -28,10 +28,28 @@ try:
 except Exception:
     pass
 
-from anthropic import AsyncAnthropic
+from openai import AsyncOpenAI
 
-MODEL_ID = "claude-sonnet-4-6"
+# OpenRouter exposes a single OpenAI-compatible endpoint that routes to many
+# upstream models. Switching providers (Anthropic direct ↔ OpenRouter) is a
+# matter of swapping base_url + API key + model slug; the request/response
+# shape is the OpenAI Chat Completions schema.
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+MODEL_ID = os.environ.get("MODEL_ID", "anthropic/claude-sonnet-4.5")
 MAX_TOKENS_PER_RESPONSE = 300
+
+
+def make_client() -> AsyncOpenAI:
+    """Build an OpenRouter client. Requires OPENROUTER_API_KEY in the env."""
+    return AsyncOpenAI(
+        base_url=OPENROUTER_BASE_URL,
+        api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+        default_headers={
+            # Optional but recommended by OpenRouter for usage attribution.
+            "HTTP-Referer": os.environ.get("OPENROUTER_REFERER", "https://github.com/csprog123/DebateAgent"),
+            "X-Title": os.environ.get("OPENROUTER_APP_TITLE", "Adversarial Debate Tool"),
+        },
+    )
 OUTPUT_DIR = Path("output")
 DEBATE_DATA_PATH = OUTPUT_DIR / "debate_data.json"
 MARKDOWN_PATH = OUTPUT_DIR / "debate_report.md"
@@ -205,18 +223,18 @@ def resolve_proposal(args: argparse.Namespace) -> tuple[str, str, str]:
 # Proposal classifier
 # ---------------------------------------------------------------------------
 
-async def classify_proposal(client: AsyncAnthropic, proposal: str) -> str:
+async def classify_proposal(client: AsyncOpenAI, proposal: str) -> str:
     prompt = (
         "Classify the following proposal into exactly ONE of these categories:\n"
         f"{', '.join(PROPOSAL_TYPES)}.\n"
         "Reply with ONLY the category token, nothing else.\n\n"
         f"PROPOSAL:\n{proposal[:6000]}"
     )
-    resp = await client.messages.create(
+    resp = await client.chat.completions.create(
         model=MODEL_ID, max_tokens=20,
         messages=[{"role": "user", "content": prompt}],
     )
-    raw = "".join(b.text for b in resp.content if hasattr(b, "text")).strip().upper()
+    raw = (resp.choices[0].message.content or "").strip().upper()
     for t in PROPOSAL_TYPES:
         if t in raw:
             return t
@@ -475,20 +493,21 @@ def extract_json(raw: str) -> dict[str, Any] | None:
 
 
 async def call_agent(
-    client: AsyncAnthropic, agent: Agent, user_msg: str,
+    client: AsyncOpenAI, agent: Agent, user_msg: str,
     validator, max_retries: int = 1,
 ) -> dict[str, Any]:
     """Call agent, parse JSON, validate. One retry on failure."""
     messages = agent.history + [{"role": "user", "content": user_msg}]
     last_err = None
     for attempt in range(max_retries + 1):
-        resp = await client.messages.create(
+        # OpenAI Chat Completions puts the system prompt as the first message
+        # rather than a separate parameter (the Anthropic Messages convention).
+        resp = await client.chat.completions.create(
             model=MODEL_ID,
             max_tokens=MAX_TOKENS_PER_RESPONSE,
-            system=agent.system_prompt,
-            messages=messages,
+            messages=[{"role": "system", "content": agent.system_prompt}, *messages],
         )
-        raw = "".join(b.text for b in resp.content if hasattr(b, "text"))
+        raw = resp.choices[0].message.content or ""
         parsed = extract_json(raw)
         ok, err = (False, "no json") if parsed is None else validator(parsed)
         if ok:
@@ -580,7 +599,7 @@ def detect_groupthink(round1: list[dict[str, Any]]) -> bool:
 # ---------------------------------------------------------------------------
 
 async def run_debate(
-    client: AsyncAnthropic, agents: dict[str, Agent], proposal_type: str,
+    client: AsyncOpenAI, agents: dict[str, Agent], proposal_type: str,
     continue_on_critical: bool | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Run the 3-round debate.
@@ -959,7 +978,7 @@ async def run_pipeline(
     dict with keys: metadata, personas, resilience_score, round_1/2/3,
     synthesis, proposal_summary, markdown_report.
     """
-    client = AsyncAnthropic()
+    client = make_client()
 
     if proposal_type is None:
         proposal_type = await classify_proposal(client, proposal_text)
@@ -1027,8 +1046,8 @@ async def run_pipeline(
 
 async def amain() -> int:
     args = parse_args()
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("[ERROR] ANTHROPIC_API_KEY not set.")
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        print("[ERROR] OPENROUTER_API_KEY not set.")
         return 2
 
     proposal, source_label, title = resolve_proposal(args)

@@ -163,13 +163,14 @@ async def index() -> HTMLResponse:
 @app.get("/api/health")
 async def health() -> dict[str, str]:
     return {"status": "ok",
-            "anthropic_key_present": "yes" if os.environ.get("ANTHROPIC_API_KEY") else "no"}
+            "openrouter_key_present": "yes" if os.environ.get("OPENROUTER_API_KEY") else "no",
+            "model_id": os.environ.get("MODEL_ID", "anthropic/claude-sonnet-4.5")}
 
 
 @app.post("/api/debate")
 async def debate_endpoint(req: DebateRequest) -> JSONResponse:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise HTTPException(500, "ANTHROPIC_API_KEY is not configured on the server.")
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        raise HTTPException(500, "OPENROUTER_API_KEY is not configured on the server.")
     if req.proposal_type and req.proposal_type not in PROPOSAL_TYPES:
         raise HTTPException(400, f"proposal_type must be one of {PROPOSAL_TYPES}.")
 

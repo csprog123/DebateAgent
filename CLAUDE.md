@@ -8,16 +8,18 @@ Risk & Legal, Adaptive Stakeholder). The output is a Markdown and DOCX
 
 ## Stack
 - **Python 3.11+** — orchestrator, agents, scoring, Markdown writer
-- **Anthropic Python SDK (native)** — `AsyncAnthropic`, no agent frameworks
+- **OpenAI Python SDK pointed at OpenRouter** — `AsyncOpenAI` with `base_url=https://openrouter.ai/api/v1`, no agent frameworks. Default model `anthropic/claude-sonnet-4.5` (override via `MODEL_ID` env var).
 - **Node.js + `docx` ^8.x** — DOCX report generator (`generate_report.js`)
 - **pypdf** — local PDF ingestion
 - **httpx** — Notion REST API client (fallback chain)
 
-All four agents run on model id: `claude-sonnet-4-6`.
+All four agents run via OpenRouter on the model slug set by `MODEL_ID`
+(default: `anthropic/claude-sonnet-4.5`).
 
 ## Environment variables
-- `ANTHROPIC_API_KEY` — required
-- `NOTION_API_KEY`    — required only if you use `--notion-page` or `--notion-output`
+- `OPENROUTER_API_KEY` — required
+- `MODEL_ID`           — optional, default `anthropic/claude-sonnet-4.5`
+- `NOTION_API_KEY`     — required only if you use `--notion-page` or `--notion-output`
 
 Copy `.env.template` to `.env` and fill in. `.env` is gitignored.
 

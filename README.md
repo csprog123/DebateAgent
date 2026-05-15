@@ -30,7 +30,9 @@ The output is:
               node generate_report.js  → debate_report.docx
 ```
 
-All agents use the model id **`claude-sonnet-4-6`**.
+All agents are called via **OpenRouter** (OpenAI-compatible endpoint) using
+the model slug from the `MODEL_ID` env var. Default: **`anthropic/claude-sonnet-4.5`**.
+Any model OpenRouter supports works (e.g. `openai/gpt-4o`, `google/gemini-pro-1.5`).
 
 ## Prerequisites
 - Python 3.11+
@@ -45,7 +47,8 @@ cp .env.template .env             # then fill in keys
 
 ## Environment variables (`.env`)
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+OPENROUTER_API_KEY=sk-or-...      # required — get one at https://openrouter.ai/keys
+MODEL_ID=anthropic/claude-sonnet-4.5   # optional — override model
 NOTION_API_KEY=secret_...         # optional, only for Notion input/output
 ```
 
@@ -159,8 +162,9 @@ as a Vercel serverless function.
 
 1. Connect the GitHub repo to a Vercel project (or run `vercel link` locally).
 2. In **Project Settings → Environment Variables**, add:
-   - `ANTHROPIC_API_KEY` (required)
-   - `NOTION_API_KEY` (optional)
+   - `OPENROUTER_API_KEY` (required)
+   - `MODEL_ID` (optional, default `anthropic/claude-sonnet-4.5`)
+   - `NOTION_API_KEY` (optional, CLI-only)
 3. Deploy. The function entrypoint is `api/index.py`, configured via
    `vercel.json` (300s `maxDuration`).
 
